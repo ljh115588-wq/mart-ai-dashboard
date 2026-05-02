@@ -24,7 +24,6 @@ except ImportError:
 # --- [1. 기본 설정 및 다크모드 폰트] ---
 st.set_page_config(page_title="Retail Spatial Analytics", layout="wide")
 
-# Altair 및 Matplotlib 다크 테마 적용
 alt.theme.enable('dark')
 plt.style.use('dark_background')
 
@@ -62,6 +61,8 @@ custom_css = """
     li[role="option"]:hover, li[aria-selected="true"] { background-color: #334155 !important; color: #38BDF8 !important; }
     div[data-baseweb="select"] > div { background-color: #0F172A !important; border-color: #334155 !important; color: #F8FAFC !important; }
     div[data-baseweb="select"] span { color: #F8FAFC !important; }
+    [data-testid="stExpander"] { background-color: #1E293B; border: 1px solid #334155; border-radius: 8px; }
+    [data-testid="stExpander"] summary p { font-weight: 600; color: #38BDF8; }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -185,7 +186,6 @@ if menu == "Traffic Summary":
                 col2.metric("Total Dwell Time (Hrs)", f"{total_stays:,.0f}")
                 col3.metric("Top Zone", top_zone)
                 
-                # ⭐ 1. OS 비율 전광판
                 if df_os is not None:
                     if selected_date == "All Dates (Cumulative)":
                         android_count = df_os[df_os['os'] == 'Android']['count'].sum()
@@ -214,7 +214,6 @@ if menu == "Traffic Summary":
                         </div>
                         """, unsafe_allow_html=True)
                 
-                # ⭐ 2. 수직선 탑재 고급 트렌드 차트
                 st.markdown("<br>#### Time-Series Traffic (Advanced Trend Analysis)", unsafe_allow_html=True)
                 try:
                     trend_df = pd.read_csv("time_trend_light.csv")
@@ -228,7 +227,6 @@ if menu == "Traffic Summary":
                     if not plot_data.empty:
                         base_date = pd.to_datetime("2026-01-01")
                         plot_data['Time'] = pd.to_datetime(base_date.strftime('%Y-%m-%d') + ' ' + plot_data['time_str'])
-                        
                         plot_data['Trend'] = plot_data['visitors'].rolling(window=3, min_periods=1).mean()
                         
                         peak_row = plot_data.loc[plot_data['visitors'].idxmax()]
@@ -245,13 +243,8 @@ if menu == "Traffic Summary":
                         line_chart = alt.Chart(plot_data).mark_line(
                             interpolate='monotone', color='#38BDF8', strokeWidth=3.5
                         ).encode(
-                            x='Time:T',
-                            y='Trend:Q',
-                            tooltip=[
-                                alt.Tooltip('Time:T', format='%H:%M', title='Time'), 
-                                alt.Tooltip('visitors:Q', title='Raw Visitors'),
-                                alt.Tooltip('Trend:Q', format='.1f', title='Trend (Avg)')
-                            ]
+                            x='Time:T', y='Trend:Q',
+                            tooltip=[alt.Tooltip('Time:T', format='%H:%M', title='Time'), alt.Tooltip('visitors:Q', title='Raw Visitors'), alt.Tooltip('Trend:Q', format='.1f', title='Trend (Avg)')]
                         )
                         
                         peak_point = alt.Chart(pd.DataFrame({'Time': [peak_time], 'visitors': [peak_val]})).mark_circle(
@@ -259,8 +252,7 @@ if menu == "Traffic Summary":
                         ).encode(x='Time:T', y='visitors:Q')
                         
                         peak_text = alt.Chart(pd.DataFrame({'Time': [peak_time], 'visitors': [peak_val]})).mark_text(
-                            align='left', baseline='middle', dx=12, dy=-12, color='#F43F5E', fontSize=14, fontWeight='bold',
-                            text=f'🔥 Peak: {peak_val:.0f}'
+                            align='left', baseline='middle', dx=12, dy=-12, color='#F43F5E', fontSize=14, fontWeight='bold', text=f'🔥 Peak: {peak_val:.0f}'
                         ).encode(x='Time:T', y='visitors:Q')
                         
                         final_combo_chart = (area_chart + line_chart + peak_point + peak_text).properties(height=350)
@@ -268,56 +260,75 @@ if menu == "Traffic Summary":
                 except Exception as e: 
                     st.error(f"Chart Render Error: {e}")
                 
-                # ⭐ 3. 드디어! 찐 체류시간 4사분면 차트 (Magic Quadrant)
+                # ⭐ [핵심 패치] 고객별 체류시간 사전 합산 로직 완벽 적용
                 st.markdown("<br>#### Zone Performance (Magic Quadrant)", unsafe_allow_html=True)
-                with st.spinner("Calculating Dwell Times..."):
+                with st.spinner("Calculating True Dwell Times..."):
+                    
+                    MIN_STAY_SEC = 30 # 30초 미만 통과객 제외
+                    
                     if 'stay_sec' in filtered_df.columns:
-                        zone_stats = filtered_df.groupby('zone').agg(
-                            Visitors=('real_user_id', 'nunique'),
-                            Avg_Dwell_Time=('stay_sec', lambda x: x.mean() / 60.0) 
+                        # 1. 쪼개진 데이터를 고객(real_user_id) 단위로 먼저 합산(sum)합니다!
+                        user_zone_duration = filtered_df.groupby(['zone', 'real_user_id'])['stay_sec'].sum().reset_index()
+                        
+                        # 2. 방문객 수는 해당 구역을 밟은 모든 유저 카운트
+                        total_visitors = user_zone_duration.groupby('zone')['real_user_id'].nunique().reset_index(name='Visitors')
+                        
+                        # 3. 합산된 체류시간이 30초 이상인 찐 고객만 필터링
+                        true_dwellers = user_zone_duration[user_zone_duration['stay_sec'] >= MIN_STAY_SEC]
+                        
+                        # 4. 찐 고객들의 평균 체류시간 계산 (분 단위)
+                        true_dwell_time = true_dwellers.groupby('zone').agg(
+                            Avg_Dwell_Time=('stay_sec', lambda x: x.quantile(0.9) / 60.0) 
                         ).reset_index()
+                        
+                        zone_stats = pd.merge(total_visitors, true_dwell_time, on='zone', how='left')
+                        zone_stats['Avg_Dwell_Time'] = zone_stats['Avg_Dwell_Time'].fillna(0)
+                        
                     else:
+                        # stay_sec이 없을 경우 (로그 개수로 계산할 때도 유저 단위 합산)
                         zone_user_stats = filtered_df.groupby(['zone', 'real_user_id']).size().reset_index(name='log_count')
                         zone_user_stats['dwell_time_min'] = (zone_user_stats['log_count'] * 10) / 60.0 
-                        zone_stats = zone_user_stats.groupby('zone').agg(
-                            Visitors=('real_user_id', 'nunique'),
+                        
+                        total_visitors = zone_user_stats.groupby('zone')['real_user_id'].nunique().reset_index(name='Visitors')
+                        true_dwellers = zone_user_stats[zone_user_stats['dwell_time_min'] >= (MIN_STAY_SEC / 60.0)]
+                        true_dwell_time = true_dwellers.groupby('zone').agg(
                             Avg_Dwell_Time=('dwell_time_min', 'mean')
                         ).reset_index()
+                        
+                        zone_stats = pd.merge(total_visitors, true_dwell_time, on='zone', how='left')
+                        zone_stats['Avg_Dwell_Time'] = zone_stats['Avg_Dwell_Time'].fillna(0)
 
                     if not zone_stats.empty:
                         avg_vis = zone_stats['Visitors'].mean()
                         avg_dwell = zone_stats['Avg_Dwell_Time'].mean()
                         
                         scatter = alt.Chart(zone_stats).mark_circle(size=250, opacity=0.8, color='#8B5CF6').encode(
-                            x=alt.X('Visitors:Q', title='Unique Visitors (인기도)', scale=alt.Scale(zero=False), axis=alt.Axis(gridColor='#334155', domainColor='#334155')),
-                            y=alt.Y('Avg_Dwell_Time:Q', title='Average Dwell Time [Min] (체류시간)', scale=alt.Scale(zero=False), axis=alt.Axis(gridColor='#334155', domainColor='#334155')),
-                            tooltip=['zone', 'Visitors', alt.Tooltip('Avg_Dwell_Time:Q', format='.1f', title='Dwell Time (Min)')]
+                            x=alt.X('Visitors:Q', title='Unique Visitors ', scale=alt.Scale(zero=False), axis=alt.Axis(gridColor='#334155', domainColor='#334155')),
+                            y=alt.Y('Avg_Dwell_Time:Q', title='True Dwell Time [Min] ', scale=alt.Scale(zero=False), axis=alt.Axis(gridColor='#334155', domainColor='#334155')),
+                            tooltip=['zone', 'Visitors', alt.Tooltip('Avg_Dwell_Time:Q', format='.1f', title='True Dwell Time (Min)')]
                         )
                         
                         text = scatter.mark_text(
-                            align='left', baseline='middle', dx=12, color='#0F172A', fontSize=12, fontWeight=600
+                            align='left', baseline='middle', dx=12, color='#F8FAFC', fontSize=12, fontWeight=600
                         ).encode(text='zone')
                         
                         hline = alt.Chart(pd.DataFrame({'y': [avg_dwell]})).mark_rule(color='#F43F5E', strokeDash=[4,4], strokeWidth=1.5).encode(y='y:Q')
                         vline = alt.Chart(pd.DataFrame({'x': [avg_vis]})).mark_rule(color='#F43F5E', strokeDash=[4,4], strokeWidth=1.5).encode(x='x:Q')
                         
                         quadrant_chart = (scatter + text + hline + vline).properties(height=450)
-                        
-                        st.markdown("""
-                        <div style="background-color: #1E293B; padding: 10px 15px; border-radius: 8px; border-left: 3px solid #8B5CF6; margin-bottom: 10px;">
-                            <span style="color: #94A3B8; font-size: 13px;">
-                            💡 <b>해석 방법:</b> 십자선(빨간 점선)은 전체 평균입니다. <br>
-                            - <b>우상단:</b> 방문객도 많고 오래 머무는 <b>핵심 매출 구역 (Golden Zone)</b><br>
-                            - <b>우하단:</b> 스쳐 지나가는 <b>통로 구역</b> (충동구매 상품 배치 권장)<br>
-                            - <b>좌상단:</b> 소수 마니아가 꼼꼼히 고르는 <b>목적 구매 구역</b><br>
-                            - <b>좌하단:</b> 방문객도 없고 빨리 나가는 <b>개선 필요 구역 (Dead Zone)</b>
-                            </span>
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
                         st.altair_chart(quadrant_chart, use_container_width=True)
+                        
+                        with st.expander("💡 Tip"):
+                            st.markdown("""
+                            **십자선(빨간 점선)은 전체 평균을 의미합니다.**
+                            - **산출 기준:** 센서 데이터의 단편화(분할) 현상을 보정하기 위해 **고객별 총 머문 시간을 합산**한 뒤, 단순 통과객(30초 미만)을 제외한 **'진짜 체류시간(True Dwell Time)'**을 산출했습니다.
+                            - **우상단 (Golden Zone):** 방문객도 많고 오래 머무는 핵심 매출 구역
+                            - **우하단 (통로 구역):** 스쳐 지나가는 통로 (충동구매 상품 배치 권장)
+                            - **좌상단 (목적 구매 구역):** 소수 마니아가 꼼꼼히 고르는 구역
+                            - **좌하단 (Dead Zone):** 방문객도 없고 빨리 나가는 개선 필요 구역
+                            """)
                 
-                # ⭐ 4. 고객 동선 맵
+                # 고객 동선 맵
                 st.markdown("<br>#### Customer Flow Map", unsafe_allow_html=True)
                 with st.spinner("Rendering flow map..."):
                     flow_df = filtered_df.copy()
@@ -339,12 +350,12 @@ if menu == "Traffic Summary":
                             pos = {node: ((ZONES[node]['x_min']+ZONES[node]['x_max'])/2, (ZONES[node]['y_min']+ZONES[node]['y_max'])/2) if node in ZONES else (331, 250) for node in G.nodes()}
                             
                             fig_flow, ax_flow = plt.subplots(figsize=(12, 9), dpi=150)
-                            fig_flow.patch.set_facecolor('white')
-                            ax_flow.set_facecolor('white')
+                            fig_flow.patch.set_facecolor('#0F172A')
+                            ax_flow.set_facecolor('#0F172A')
                             img_path = 'map_image.jpg'
                             try:
                                 img = mpimg.imread(img_path)
-                                ax_flow.imshow(img, extent=[0, 663, 500, 0], alpha=0.5)
+                                ax_flow.imshow(img, extent=[0, 663, 500, 0], alpha=0.35)
                             except: ax_flow.set_xlim(0, 663); ax_flow.set_ylim(500, 0); ax_flow.invert_yaxis()
                             
                             max_pop = max(list(zone_popularity.values())) if zone_popularity.values() else 1
@@ -353,13 +364,52 @@ if menu == "Traffic Summary":
                             max_weight = max([G[u][v]['weight'] for u, v in G.edges()]) if G.edges() else 1
                             edge_widths = [(G[u][v]['weight'] / max_weight) * 3 + 0.5 for u, v in G.edges()]
                             
-                            nx.draw_networkx_nodes(G, pos, ax=ax_flow, node_size=node_sizes, node_color=node_colors, edgecolors='black', linewidths=1.2, alpha=0.85)
+                            nx.draw_networkx_nodes(G, pos, ax=ax_flow, node_size=node_sizes, node_color=node_colors, edgecolors='#F8FAFC', linewidths=1.2, alpha=0.85)
                             nx.draw_networkx_edges(G, pos, ax=ax_flow, width=edge_widths, edge_color='#D84315', arrowsize=15, alpha=0.6, connectionstyle='arc3,rad=0.2')
-                            nx.draw_networkx_labels(G, pos, ax=ax_flow, font_family=plt.rcParams['font.family'], font_size=9, font_weight='bold', font_color='black', bbox=dict(facecolor='white', alpha=0.9, edgecolor='none', boxstyle='round,pad=0.3'))
+                            
+                            nx.draw_networkx_labels(G, pos, ax=ax_flow, font_family=plt.rcParams['font.family'], font_size=9, font_weight='bold', font_color='#F8FAFC', bbox=dict(facecolor='#1E293B', alpha=0.9, edgecolor='#334155', boxstyle='round,pad=0.3'))
                             ax_flow.axis('off')
-                            st.pyplot(fig_flow, facecolor='white')
+                            st.pyplot(fig_flow, facecolor='#0F172A')
+
+                # 장바구니 연관성 분석
+                st.markdown("<br>#### Basket & Cross-Visitation Analysis", unsafe_allow_html=True)
+                with st.spinner("Calculating Cross-Visitation..."):
+                    unique_visits = filtered_df.drop_duplicates(subset=['real_user_id', 'zone'])
+                    user_zone_matrix = pd.crosstab(unique_visits['real_user_id'], unique_visits['zone'])
+                    co_matrix = user_zone_matrix.T.dot(user_zone_matrix)
+                    
+                    for z in co_matrix.columns:
+                        co_matrix.loc[z, z] = 0
+
+                    df_melted = co_matrix.reset_index().melt(id_vars='zone', var_name='Target Zone', value_name='Co-Visitors')
+                    df_melted = df_melted[df_melted['Co-Visitors'] > 0]
+
+                    if not df_melted.empty:
+                        heatmap = alt.Chart(df_melted).mark_rect().encode(
+                            x=alt.X('Target Zone:N', title='동시 방문 구역 (함께 간 곳)', axis=alt.Axis(labelAngle=-45, gridColor='#334155', domainColor='#334155', labelOverlap=False)),
+                            y=alt.Y('zone:N', title='기준 구역 (시작점)', axis=alt.Axis(gridColor='#334155', domainColor='#334155', labelOverlap=False)),
+                            color=alt.Color('Co-Visitors:Q', scale=alt.Scale(scheme='purples'), legend=alt.Legend(title="동시 방문자 수")),
+                            tooltip=[
+                                alt.Tooltip('zone:N', title='기준 구역'), 
+                                alt.Tooltip('Target Zone:N', title='동시 방문 구역'), 
+                                alt.Tooltip('Co-Visitors:Q', title='겹친 방문객 수', format=',.0f')
+                            ]
+                        ).properties(height=600)
+                        
+                        st.altair_chart(heatmap, use_container_width=True)
+                        
+                        with st.expander("💡 Tip"):
+                            st.markdown("""
+                            - **색상의 의미:** 색상이 진한 보라색일수록 두 구역을 함께 방문한 고객이 많다는 뜻입니다.
+                            - **인사이트 도출:** 비 오는 날짜를 선택했을 때 특정 상품군(예: 라면-주류)의 색상이 짙어진다면, 해당 조합의 묶음 할인을 기획하거나 매대를 가깝게 배치하여 크로스셀링(Cross-selling)을 유도할 수 있습니다.
+                            - **대각선 빈칸:** 같은 구역(예: 라면-라면)이 만나는 곳은 데이터 방해를 막기 위해 의도적으로 제외(0) 처리되었습니다.
+                            """)
+                    else:
+                        st.info("해당 날짜에 겹치는 방문 데이터가 없습니다.")
+
             else: st.info("No data available for the selected parameters.")
 
+        # 다중 날짜 비교
         with tab2:
             default_selections = available_dates[:2] if len(available_dates) >= 2 else available_dates
             selected_multi_dates = st.multiselect(
@@ -384,20 +434,37 @@ if menu == "Traffic Summary":
                         base_date = pd.to_datetime("2026-01-01")
                         plot_data_multi['Time'] = pd.to_datetime(base_date.strftime('%Y-%m-%d') + ' ' + plot_data_multi['time_str'])
                         
-                        highlight = alt.selection_point(fields=['Label'], bind='legend')
+                        plot_data_multi['Trend'] = plot_data_multi.groupby('date')['visitors'].transform(lambda x: x.rolling(window=3, min_periods=1).mean())
                         
-                        chart_multi = alt.Chart(plot_data_multi).mark_line(
-                            interpolate='monotone', 
-                            strokeWidth=3
-                        ).encode(
+                        hover = alt.selection_point(fields=['Time'], nearest=True, on='mouseover', empty=False)
+
+                        base = alt.Chart(plot_data_multi).encode(
                             x=alt.X('Time:T', title='Time', axis=alt.Axis(format='%H:%M', grid=True, gridColor='#475569', gridDash=[4, 4], gridWidth=0.8, tickCount=15, domainColor='#334155')),
-                            y=alt.Y('visitors:Q', title='Visitors', axis=alt.Axis(gridColor='#334155', domainColor='#334155')),
-                            color=alt.Color('Label:N', title='Legend (Click to Isolate)', scale=alt.Scale(scheme='set2')),
-                            opacity=alt.condition(highlight, alt.value(1.0), alt.value(0.1)),
-                            tooltip=['Label:N', alt.Tooltip('Time:T', format='%H:%M'), 'visitors:Q']
-                        ).add_params(highlight)
+                            y=alt.Y('Trend:Q', title='Trend (Avg Visitors)', axis=alt.Axis(gridColor='#334155', domainColor='#334155')),
+                            color=alt.Color('Label:N', title='Legend', scale=alt.Scale(scheme='set2'))
+                        )
+                        line = base.mark_line(interpolate='monotone', strokeWidth=3.5)
+
+                        selectors = alt.Chart(plot_data_multi).mark_point().encode(
+                            x='Time:T', opacity=alt.value(0)
+                        ).add_params(hover)
+
+                        points = base.mark_circle(size=80).encode(
+                            opacity=alt.condition(hover, alt.value(1), alt.value(0)),
+                            tooltip=[alt.Tooltip('Time:T', format='%H:%M'), 'Label:N', alt.Tooltip('visitors:Q', title='Raw Visitors'), alt.Tooltip('Trend:Q', format='.1f', title='Trend')]
+                        )
+
+                        rule = alt.Chart(plot_data_multi).mark_rule(color='#F8FAFC', strokeWidth=1.5, strokeDash=[4, 4]).encode(
+                            x='Time:T'
+                        ).transform_filter(hover)
                         
-                        st.altair_chart(chart_multi.properties(height=400), use_container_width=True)
+                        text = base.mark_text(align='left', dx=8, dy=-8, fontSize=14, fontWeight='bold').encode(
+                            text=alt.condition(hover, alt.Text('Trend:Q', format='.0f'), alt.value(' ')),
+                            color=alt.Color('Label:N', scale=alt.Scale(scheme='set2'))
+                        )
+
+                        chart_multi = (line + selectors + rule + points + text).properties(height=400)
+                        st.altair_chart(chart_multi, use_container_width=True)
                         
                         st.markdown("#### Performance Summary")
                         cols = st.columns(len(selected_multi_dates))
@@ -419,7 +486,8 @@ if menu == "Traffic Summary":
                                         <p style="color: #F43F5E; font-size: 12px; margin-top: 5px;">Peak: {peak_time} ({peak_val:.0f})</p>
                                     </div>
                                     """, unsafe_allow_html=True)
-                except: pass
+                except Exception as e: 
+                    st.error(f"Multi-Date Chart Error: {e}")
 
 elif menu == "Heatmap Analysis":
     st.title("Heatmap Analysis")
@@ -441,10 +509,10 @@ elif menu == "Heatmap Analysis":
                 red_sens = st.slider("Sensitivity", 1, 50, 15, step=1)
             with col2:
                 fig, ax = plt.subplots(figsize=(10, 7), dpi=100)
-                fig.patch.set_facecolor('white')
-                ax.set_facecolor('white')
+                fig.patch.set_facecolor('#0F172A')
+                ax.set_facecolor('#0F172A')
                 
-                if os.path.exists('map_image.jpg'): ax.imshow(mpimg.imread('map_image.jpg'), extent=[0, 663, 500, 0], zorder=1, alpha=0.5)
+                if os.path.exists('map_image.jpg'): ax.imshow(mpimg.imread('map_image.jpg'), extent=[0, 663, 500, 0], zorder=1, alpha=0.35)
                 else: ax.set_xlim(0, 663); ax.set_ylim(500, 0); ax.invert_yaxis()
                 
                 df_exact = filtered_traj[(filtered_traj['x'] >= 0) & (filtered_traj['x'] <= 663) & (filtered_traj['y'] >= 0) & (filtered_traj['y'] <= 500)].copy()
@@ -458,7 +526,7 @@ elif menu == "Heatmap Analysis":
                     max_val = np.max(heatmap_smoothed)
                     if max_val > 0: ax.imshow(heatmap_smoothed, extent=[0, 663, 500, 0], cmap='Reds', alpha=0.6, zorder=3, vmin=max_val*0.01, vmax=max_val*(red_sens/100.0))
                     ax.axis('off')
-                    st.pyplot(fig, facecolor='white')
+                    st.pyplot(fig, facecolor='#0F172A')
 
 elif menu == "Demand Forecast":
     st.title("Demand Forecast")
@@ -626,9 +694,9 @@ elif menu == "Layout Simulator":
                     for _, row in top_100_sim_flows.iterrows(): G_sim.add_edge(row['zone'], row['next_zone'], weight=row['weight'])
                     
                     fig_sim, ax_sim = plt.subplots(figsize=(12, 9), dpi=150)
-                    fig_sim.patch.set_facecolor('white')
-                    ax_sim.set_facecolor('white')
-                    if os.path.exists('map_image.jpg'): ax_sim.imshow(mpimg.imread('map_image.jpg'), extent=[0, 663, 500, 0], alpha=0.5)
+                    fig_sim.patch.set_facecolor('#0F172A')
+                    ax_sim.set_facecolor('#0F172A')
+                    if os.path.exists('map_image.jpg'): ax_sim.imshow(mpimg.imread('map_image.jpg'), extent=[0, 663, 500, 0], alpha=0.35)
                     else: ax_sim.set_xlim(0, 663); ax_sim.set_ylim(500, 0); ax_sim.invert_yaxis()
                     
                     max_pop = max(list(sim_zone_pop.values())) if sim_zone_pop.values() else 1
@@ -645,12 +713,12 @@ elif menu == "Layout Simulator":
                     max_weight = max([G_sim[u][v]['weight'] for u, v in G_sim.edges()]) if G_sim.edges() else 1
                     edge_widths = [(G_sim[u][v]['weight'] / max_weight) * 3 + 0.5 for u, v in G_sim.edges()]
                     
-                    nx.draw_networkx_nodes(G_sim, sim_centers, ax=ax_sim, node_size=node_sizes, node_color=node_colors, edgecolors='black', linewidths=1.2)
+                    nx.draw_networkx_nodes(G_sim, sim_centers, ax=ax_sim, node_size=node_sizes, node_color=node_colors, edgecolors='#F8FAFC', linewidths=1.2)
                     nx.draw_networkx_edges(G_sim, sim_centers, ax=ax_sim, width=edge_widths, edge_color='#6366F1', arrowsize=15, alpha=0.6, connectionstyle='arc3,rad=0.2')
-                    nx.draw_networkx_labels(G_sim, sim_centers, ax=ax_sim, font_family=plt.rcParams['font.family'], font_size=9, font_weight='bold', font_color='black', bbox=dict(facecolor='white', alpha=0.9, edgecolor='none', boxstyle='round,pad=0.3'))
+                    nx.draw_networkx_labels(G_sim, sim_centers, ax=ax_sim, font_family=plt.rcParams['font.family'], font_size=9, font_weight='bold', font_color='#F8FAFC', bbox=dict(facecolor='#1E293B', alpha=0.9, edgecolor='#334155', boxstyle='round,pad=0.3'))
                     
                     ax_sim.axis('off')
-                    st.pyplot(fig_sim, facecolor='white')
+                    st.pyplot(fig_sim, facecolor='#0F172A')
 
 elif menu == "LLM Assistant":
     st.title("LLM Operations Advisor")
@@ -724,12 +792,12 @@ elif menu == "Sensor Map":
     try:
         sward_df = pd.read_csv('swards (1).csv')
         fig, ax = plt.subplots(figsize=(10, 7), dpi=200)
-        fig.patch.set_facecolor('white')
-        ax.set_facecolor('white')
-        if os.path.exists('map_image.jpg'): ax.imshow(mpimg.imread('map_image.jpg'), extent=[0, 663, 500, 0], zorder=1, alpha=0.5)
+        fig.patch.set_facecolor('#0F172A')
+        ax.set_facecolor('#0F172A')
+        if os.path.exists('map_image.jpg'): ax.imshow(mpimg.imread('map_image.jpg'), extent=[0, 663, 500, 0], zorder=1, alpha=0.35)
         else: ax.set_xlim(0, 663); ax.set_ylim(500, 0); ax.invert_yaxis()
-        ax.scatter(sward_df['x'], sward_df['y'], color='#F43F5E', s=55, edgecolors='black', linewidth=1, zorder=2)
-        for _, row in sward_df.iterrows(): ax.annotate(str(row['description']), (row['x'], row['y']), xytext=(5, 5), textcoords='offset points', fontsize=8, color='black', fontweight='bold')
+        ax.scatter(sward_df['x'], sward_df['y'], color='#F43F5E', s=55, edgecolors='#F8FAFC', linewidth=1, zorder=2)
+        for _, row in sward_df.iterrows(): ax.annotate(str(row['description']), (row['x'], row['y']), xytext=(5, 5), textcoords='offset points', fontsize=8, color='#F8FAFC', fontweight='bold', bbox=dict(facecolor='#1E293B', alpha=0.7, edgecolor='none', boxstyle='round,pad=0.2'))
         ax.axis('off')
-        st.pyplot(fig, facecolor='white')
+        st.pyplot(fig, facecolor='#0F172A')
     except: st.error("Sensor configuration file not found.")
